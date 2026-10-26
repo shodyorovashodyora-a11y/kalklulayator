@@ -13,10 +13,12 @@ APK (`app-debug.apk`) dan tiklangan Capacitor loyihasi. Veb-kod: `www/index.html
 ## Mahalliy (Node 22 + JDK 21 + Android SDK 36)
 ```
 npm ci
+# Android loyiha hali yo'q bo'lsa bir marta ishga tushiring; mavjud android/ ni o'chirmang.
 npx cap add android
 # android/keystore.properties yarating: storeFile, storePassword, keyAlias, keyPassword
 npm run android:aab
 ```
+`android/` loyihasi allaqachon mavjud bo'lsa, `npx cap add android` buyrug'ini o'tkazib yuboring. AAB buildi Windows'da `gradlew.bat`, Linux/macOS'da `gradlew` wrapper'ini o'zi ishga tushiradi.
 Natija: `android/app/build/outputs/bundle/release/app-release.aab`
 `VERSION_CODE` va `VERSION_NAME` muhit o'zgaruvchilari bilan lokal build versiyasini belgilang; qiymatlar GitHub Actions workflow’idagi kabi tekshiriladi.
 
