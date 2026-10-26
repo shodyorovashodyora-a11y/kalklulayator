@@ -1,0 +1,137 @@
+name: Build signed AAB
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_code:
+        description: 'Play Console’da har yangi yuklashda oshiring (1–2100000000)'
+        default: '1'
+        required: true
+      version_name:
+        description: 'versionName'
+        default: '1.0.0'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+      - name: Install Android 36 platform
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Validate release version
+        env:
+          VERSION_CODE: ${{ inputs.version_code }}
+          VERSION_NAME: ${{ inputs.version_name }}
+        run: |
+          if ! [[ "$VERSION_CODE" =~ ^[1-9][0-9]{0,9}$ ]] || (( VERSION_CODE > 2100000000 )); then
+            echo "::error::version_code must be an integer from 1 to 2100000000"
+            exit 1
+          fi
+          if ! [[ "$VERSION_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9.+_-]{0,49}$ ]]; then
+            echo "::error::version_name must be 1-50 characters using letters, numbers, dots, +, _ or -"
+            exit 1
+          fi
+      - run: npm ci
+      - run: npx cap add android
+      - name: Patch Android project
+        env:
+          VERSION_CODE: ${{ inputs.version_code }}
+          VERSION_NAME: ${{ inputs.version_name }}
+        run: |
+          npx cap sync android
+          node scripts/patch-android.mjs
+      - name: Write keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          python - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          required = ("KEYSTORE_BASE64", "KEYSTORE_PASSWORD", "KEY_ALIAS", "KEY_PASSWORD")
+          missing = [name for name in required if not os.environ.get(name)]
+          if missing:
+              raise SystemExit("Missing required GitHub Actions secrets: " + ", ".join(missing))
+
+          try:
+              keystore = base64.b64decode(os.environ["KEYSTORE_BASE64"], validate=True)
+          except ValueError as error:
+              raise SystemExit("KEYSTORE_BASE64 is not valid Base64") from error
+          if not keystore:
+              raise SystemExit("KEYSTORE_BASE64 decoded to an empty keystore")
+
+          def escape_property(value):
+              result = []
+              for index, char in enumerate(value):
+                  if char in "\\=:#!":
+                      result.append("\\" + char)
+                  elif char == " " and index == 0:
+                      result.append("\\ ")
+                  elif char == "\t":
+                      result.append("\\t")
+                  elif char == "\n":
+                      result.append("\\n")
+                  elif char == "\r":
+                      result.append("\\r")
+                  elif char == "\f":
+                      result.append("\\f")
+                  elif ord(char) > 0x7e:
+                      codepoint = ord(char)
+                      if codepoint <= 0xffff:
+                          result.append(f"\\u{codepoint:04x}")
+                      else:
+                          codepoint -= 0x10000
+                          result.append(f"\\u{0xd800 + (codepoint >> 10):04x}")
+                          result.append(f"\\u{0xdc00 + (codepoint & 0x3ff):04x}")
+                  else:
+                      result.append(char)
+              return "".join(result)
+
+          Path("android/upload-keystore.jks").write_bytes(keystore)
+          properties = {
+              "storeFile": "../upload-keystore.jks",
+              "storePassword": os.environ["KEYSTORE_PASSWORD"],
+              "keyAlias": os.environ["KEY_ALIAS"],
+              "keyPassword": os.environ["KEY_PASSWORD"],
+          }
+          Path("android/keystore.properties").write_text(
+              "".join(f"{key}={escape_property(value)}\n" for key, value in properties.items()),
+              encoding="ascii",
+          )
+          PY
+      - name: Build AAB
+        working-directory: android
+        run: ./gradlew --no-daemon bundleRelease
+      - name: Verify AAB signature
+        run: |
+          verification="$(jarsigner -verify android/app/build/outputs/bundle/release/app-release.aab 2>&1)" || {
+            echo "$verification"
+            exit 1
+          }
+          echo "$verification"
+          if ! grep -q 'jar verified\.' <<< "$verification"; then
+            echo "::error::The generated AAB is not signed"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vault-calculator-aab
+          path: android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 14
